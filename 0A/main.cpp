@@ -1,7 +1,4 @@
 //
-// Created by irwan on 9/3/2025.
-//
-//
 // Created by cahInfor on 9/3/2025.
 //
 

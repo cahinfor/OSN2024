@@ -4,3 +4,4 @@ project(OSN2024)
 set(CMAKE_CXX_STANDARD 20)
 
 add_executable(OSN20240A 0A/main.cpp)
+add_executable(OSN20240B 0B/main.cpp)
