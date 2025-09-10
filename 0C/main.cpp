@@ -19,7 +19,7 @@ static bool read_grid_from_file(const string& path, vector<string>& F) {
     F.assign(N, string());
     for (int i = 0; i < N; ++i) {
         string row; in >> row;
-        if ((int)row.size() != M) return false;
+        if (static_cast<int>(row.size()) != M) return false;
         F[i] = row;
     }
     return true;
@@ -29,27 +29,27 @@ static bool write_commands_to_file(const string& path, const vector<Cmd>& cmds) 
     ofstream out(path.c_str());
     if (!out) return false;
     out << static_cast<int>(cmds.size()) << "\n";
-    for (auto &c : cmds) out << c.type << ' ' << c.idx << ' ' << c.ch << "\n";
+    for (const auto &[type, idx, ch] : cmds) out << type << ' ' << idx << ' ' << ch << "\n";
     return true;
 }
 
 /* ---------- Bit helpers for arbitrary M ---------- */
 
-static inline int num_chunks(int M) { return (M + 63) >> 6; }
+static int num_chunks(const int M) { return (M + 63) >> 6; }
 
-static inline bool get_bit(const vector<uint64_t>& v, int j) {
+static bool get_bit(const vector<uint64_t>& v, int j) {
     return (v[j >> 6] >> (j & 63)) & 1ULL;
 }
 
-static inline void set_bit(vector<uint64_t>& v, int j) {
+static void set_bit(vector<uint64_t>& v, int j) {
     v[j >> 6] |= (1ULL << (j & 63));
 }
 
-static inline void clear_bit(vector<uint64_t>& v, int j) {
+static void clear_bit(vector<uint64_t>& v, int j) {
     v[j >> 6] &= ~(1ULL << (j & 63));
 }
 
-static inline bool contains_all(const vector<uint64_t>& a, const vector<uint64_t>& need) {
+static bool contains_all(const vector<uint64_t>& a, const vector<uint64_t>& need) {
     // Return true if (a & need) == need  <=>  (~a & need) == 0
     for (size_t k = 0; k < need.size(); ++k) {
         if ((~a[k]) & need[k]) return false;
@@ -58,7 +58,7 @@ static inline bool contains_all(const vector<uint64_t>& a, const vector<uint64_t
 }
 
 /* Serialize chunk vector into a string key (fast hashing, equality) */
-static inline string chunks_key(const vector<uint64_t>& v) {
+static string chunks_key(const vector<uint64_t>& v) {
     string s;
     s.resize(v.size() * sizeof(uint64_t));
     memcpy(&s[0], v.data(), v.size() * sizeof(uint64_t));
@@ -66,9 +66,9 @@ static inline string chunks_key(const vector<uint64_t>& v) {
 }
 
 /* ---------- Fast solver with chunked masks (works for M up to millions) ---------- */
-static vector<Cmd> solve_one_fast(const vector<string>& F) {
-    const int N = (int)F.size();
-    const int M = N ? (int)F[0].size() : 0;
+static vector<Cmd> solve(const vector<string>& F) {
+    const int N = static_cast<int>(F.size());
+    const int M = N ? static_cast<int>(F[0].size()) : 0;
     if (N == 0 || M == 0) return {};
 
     const int C = num_chunks(M);
@@ -101,13 +101,12 @@ static vector<Cmd> solve_one_fast(const vector<string>& F) {
 
     for (int r : rowsWithSharp) {
         string key = chunks_key(rowMask[r]);
-        auto it = maskId.find(key);
-        if (it == maskId.end()) {
-            int id = (int)masks.size();
+        if (auto it = maskId.find(key); it == maskId.end()) {
+            int id = static_cast<int>(masks.size());
             maskId.emplace(std::move(key), id);
             masks.push_back(rowMask[r]);
             cnt.push_back(1);
-            rowsPerMask.push_back(vector<int>{r});
+            rowsPerMask.push_back(vector{r});
         } else {
             int id = it->second;
             cnt[id] += 1;
@@ -115,7 +114,7 @@ static vector<Cmd> solve_one_fast(const vector<string>& F) {
         }
     }
 
-    const int U = (int)masks.size();
+    const int U = static_cast<int>(masks.size());
 
     // dotRemaining per column
     vector<long long> dotRemaining(M, 0);
@@ -161,8 +160,8 @@ static vector<Cmd> solve_one_fast(const vector<string>& F) {
     }
 
     // Place KOLOM after the last row that needs '.' in that column
-    vector<int> lastPos(M, -1);
-    for (int idx = 0; idx < (int)order.size(); ++idx) {
+    vector lastPos(M, -1);
+    for (int idx = 0; idx < static_cast<int>(order.size()); ++idx) {
         int r = order[idx];
         for (int j = 0; j < M; ++j) if (F[r][j] == '.') lastPos[j] = idx;
     }
@@ -173,11 +172,10 @@ static vector<Cmd> solve_one_fast(const vector<string>& F) {
     // Emit commands: BARIS then KOLOM bucket
     vector<Cmd> cmds;
     cmds.reserve(order.size() + M);
-    for (int k = 0; k < (int)order.size(); ++k) {
-        int r = order[k];
-        if (F[r].find('#') != string::npos) cmds.push_back({"BARIS", r + 1, '#'});
+    for (int k = 0; k < static_cast<int>(order.size()); ++k) {
+        if (int r = order[k]; F[r].find('#') != string::npos) cmds.push_back({"BARIS", r + 1, '#'});
         if (!buckets[k].empty()) {
-            sort(buckets[k].begin(), buckets[k].end());
+            ranges::sort(buckets[k]);
             for (int j : buckets[k]) cmds.push_back({"KOLOM", j + 1, '.'});
         }
     }
@@ -207,7 +205,7 @@ int main() {
         }
         closedir(d);
     }
-    sort(jobs.begin(), jobs.end());
+    ranges::sort(jobs);
 
     for (auto &job : jobs) {
         int id; string inpath;
@@ -219,7 +217,7 @@ int main() {
             continue;
         }
 
-        auto cmds = solve_one_fast(F);
+        auto cmds = solve(F);
 
         ostringstream oss;
         oss << output_dir << "/mosaik_" << id << ".out";

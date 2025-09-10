@@ -9,6 +9,7 @@
 #include <bits/stdc++.h>
 #include <dirent.h>
 #include <cmath>
+#include <ranges>
 using namespace std;
 
 struct CasePaths {
@@ -34,7 +35,7 @@ static bool read_target(const string& path, int& N, int& M, vector<string>& targ
     target.assign(N, string());
     for (int i = 0; i < N; ++i) {
         string row; if (!(in >> row)) return false;
-        if ((int)row.size() != M) return false;
+        if (static_cast<int>(row.size()) != M) return false;
         target[i] = row;
     }
     return true;
@@ -67,7 +68,7 @@ static double judge_one(const string& in_path, const string& out_path, bool prin
         return 0.0;
     }
 
-    vector<string> board(N, string(M, '.'));
+    vector board(N, string(M, '.'));
 
     for (auto& t : cmds) {
         const string& dir = get<0>(t);
@@ -85,8 +86,8 @@ static double judge_one(const string& in_path, const string& out_path, bool prin
         for (int j = 0; j < M; ++j)
             if (board[i][j] == target[i][j]) ++match;
 
-    double frac = (double)match / (double)total;          // avoid integer division
-    double score = pow(frac, 3.0) * 20.0;                 // same formula as yours
+    const double frac = static_cast<double>(match) / static_cast<double>(total);          // avoid integer division
+    const double score = pow(frac, 3.0) * 20.0;                 // same formula as yours
     cout << fixed << setprecision(6) << score << "\n";
     return score;
 }
@@ -97,8 +98,7 @@ static void collect_ids(const string& dir, const string& prefix, const string& e
         dirent* ent;
         while ((ent = readdir(d)) != nullptr) {
             string name = ent->d_name;
-            smatch m;
-            if (regex_match(name, m, pat)) {
+            if (smatch m; regex_match(name, m, pat)) {
                 int id = stoi(m[1].str());
                 out[id] = dir + "/" + name;
             }
@@ -122,11 +122,10 @@ int main() {
     // Build pairs that exist in both
     vector<int> ids;
     ids.reserve(in_map.size());
-    for (auto& kv : in_map) {
-        int id = kv.first;
-        if (out_map.count(id)) ids.push_back(id);
+    for (const auto &key: in_map | views::keys) {
+        if (int id = key; out_map.contains(id)) ids.push_back(id);
     }
-    sort(ids.begin(), ids.end());
+    ranges::sort(ids);
 
     if (ids.empty()) {
         cerr << "[WARN] No matching input/output pairs found.\n";
