@@ -1,5 +1,3 @@
-Help me solve ths
-
 # Harta Karun Nasional
 
 ## Deskripsi
