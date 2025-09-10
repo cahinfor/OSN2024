@@ -1,237 +1,214 @@
-//
-// Created by cahInfor on 10/09/25.
-//
-
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <string>
-#include <algorithm>
-#include <utility>
+#include <bits/stdc++.h>
 #include <dirent.h>
-
+#include <sys/stat.h>
 using namespace std;
 
-// Represents a single coloring operation on a row or column.
-struct Operation {
-    string type;
-    int index;
-    char color;
-};
+struct Cmd { string type; int idx; char ch; };
 
-// The core logic to solve the problem for a single grid, given a strategy.
-// Strategy 1: Rows then Columns
-// Strategy 2: Columns then Rows
-// ----------------- NEW SOLVER (drop-in) -----------------
-static pair<long long, vector<Operation>>
-solve_only_hash_union(int N, int M, const vector<string>& S,
-                      bool bias_hash_on_tie, bool init_rows_by_majority) {
-    // Build sparse lists of '#' positions
-    vector<vector<int>> rows_hash_cols(N);
-    vector<vector<int>> cols_hash_rows(M);
-    vector<int> row_hash_cnt(N, 0), col_hash_cnt(M, 0);
+static void ensure_dir(const string& dir) {
+    struct stat st;
+    if (stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) return;
+    mkdir(dir.c_str(), 0755);
+}
 
+static bool read_grid_from_file(const string& path, vector<string>& F) {
+    ifstream in(path.c_str());
+    if (!in) return false;
+    int N, M;
+    if (!(in >> N >> M)) return false;
+    F.assign(N, string());
     for (int i = 0; i < N; ++i) {
+        string row; in >> row;
+        if ((int)row.size() != M) return false;
+        F[i] = row;
+    }
+    return true;
+}
+
+static bool write_commands_to_file(const string& path, const vector<Cmd>& cmds) {
+    ofstream out(path.c_str());
+    if (!out) return false;
+    out << (int)cmds.size() << "\n";
+    for (auto &c : cmds) out << c.type << ' ' << c.idx << ' ' << c.ch << "\n";
+    return true;
+}
+
+// Fast solver using mask-group ordering (no dense DAG)
+static vector<Cmd> solve_one_fast(const vector<string>& F) {
+    const int N = (int)F.size();
+    const int M = N ? (int)F[0].size() : 0;
+
+    // Build mask per row (bit = 1 means wants '.')
+    vector<uint32_t> rowMask(N, 0);
+    vector<int> rowsWithSharp; rowsWithSharp.reserve(N);
+    for (int i = 0; i < N; ++i) {
+        uint32_t m = 0;
+        bool anySharp = false;
         for (int j = 0; j < M; ++j) {
-            if (S[i][j] == '#') {
-                rows_hash_cols[i].push_back(j);
-                cols_hash_rows[j].push_back(i);
-                row_hash_cnt[i]++;
-                col_hash_cnt[j]++;
+            if (F[i][j] == '.') m |= (1u << j);
+            else anySharp = true;
+        }
+        rowMask[i] = m;
+        if (anySharp) rowsWithSharp.push_back(i);
+    }
+
+    if (rowsWithSharp.empty()) {
+        // All dots already; starting grid is dots, so nothing to do.
+        return {};
+    }
+
+    // Compress by mask
+    unordered_map<uint32_t, int> maskId;
+    maskId.reserve(rowsWithSharp.size()*2);
+    vector<uint32_t> masks; masks.reserve(rowsWithSharp.size());
+    vector<int> cnt; cnt.reserve(rowsWithSharp.size());
+    vector<vector<int>> rowsPerMask; rowsPerMask.reserve(rowsWithSharp.size());
+
+    for (int r : rowsWithSharp) {
+        uint32_t m = rowMask[r];
+        auto it = maskId.find(m);
+        if (it == maskId.end()) {
+            int id = (int)masks.size();
+            maskId[m] = id;
+            masks.push_back(m);
+            cnt.push_back(1);
+            rowsPerMask.push_back(vector<int>{r});
+        } else {
+            int id = it->second;
+            cnt[id] += 1;
+            rowsPerMask[id].push_back(r);
+        }
+    }
+
+    const int U = (int)masks.size();
+
+    // dotRemaining per column
+    vector<long long> dotRemaining(M, 0);
+    for (int id = 0; id < U; ++id) {
+        uint32_t m = masks[id];
+        for (int j = 0; j < M; ++j) if (m & (1u << j)) {
+            dotRemaining[j] += cnt[id];
+        }
+    }
+
+    // Build the processing order of rows (indices into original F)
+    vector<int> order; order.reserve(rowsWithSharp.size());
+
+    // Fbits: columns that still have any dot remaining (1 = still need dots)
+    uint32_t Fbits = 0;
+    for (int j = 0; j < M; ++j) if (dotRemaining[j] > 0) Fbits |= (1u << j);
+
+    vector<char> done(U, 0);
+    bool progressed = true;
+    while (progressed) {
+        progressed = false;
+
+        // Scan all masks; pick any mask available: (m & Fbits) == Fbits
+        for (int id = 0; id < U; ++id) if (!done[id] && cnt[id] > 0) {
+            uint32_t m = masks[id];
+            if ( (m & Fbits) == Fbits ) {
+                // Emit all rows of this mask (any order is fine)
+                for (int r : rowsPerMask[id]) order.push_back(r);
+
+                // Update counts
+                int take = cnt[id];
+                cnt[id] = 0;
+                done[id] = 1;
+                for (int j = 0; j < M; ++j) if (m & (1u << j)) {
+                    dotRemaining[j] -= take;
+                    if (dotRemaining[j] == 0) {
+                        Fbits &= ~(1u << j); // this column no longer forces dot
+                    }
+                }
+                progressed = true;
+                // Keep scanning; Fbits may have shrunk, unlocking more masks.
             }
         }
     }
 
-    // Decisions: R[i]=1 if paint row i '#', C[j]=1 if paint col j '#'
-    vector<unsigned char> R(N, 0), C(M, 0);
-
-    // Optional initialization: set R by row-majority
-    if (init_rows_by_majority) {
-        for (int i = 0; i < N; ++i) {
-            // If we paint row i -> whole row becomes '#', matches = row_hash_cnt[i]
-            // If we don't -> matches come only from columns later; for init we can start simple
-            // Here we just seed by whether row has majority '#'
-            if (row_hash_cnt[i] * 2 >= M) R[i] = 1;
-        }
+    // Safety: if some masks remained (shouldn't happen for valid mosaics), append them anyway.
+    for (int id = 0; id < U; ++id) if (cnt[id] > 0) {
+        for (int r : rowsPerMask[id]) order.push_back(r);
+        cnt[id] = 0;
     }
 
-    vector<int> col_hash_in_R1(M, 0), row_hash_in_C1(N, 0);
-
-    auto update_col_hash_in_R1 = [&]() {
-        fill(col_hash_in_R1.begin(), col_hash_in_R1.end(), 0);
-        for (int i = 0; i < N; ++i) if (R[i]) {
-            for (int j : rows_hash_cols[i]) ++col_hash_in_R1[j];
+    // Build placement of KOLOM after last row needing '.' in that column
+    vector<int> lastPos(M, -1);
+    vector<int> pos(N, -1);
+    for (int i = 0; i < (int)order.size(); ++i) pos[order[i]] = i;
+    for (int j = 0; j < M; ++j) {
+        int lp = -1;
+        for (int idx = 0; idx < (int)order.size(); ++idx) {
+            int r = order[idx];
+            if (F[r][j] == '.') lp = idx;
         }
-    };
-    auto update_row_hash_in_C1 = [&]() {
-        fill(row_hash_in_C1.begin(), row_hash_in_C1.end(), 0);
-        for (int j = 0; j < M; ++j) if (C[j]) {
-            for (int i : cols_hash_rows[j]) ++row_hash_in_C1[i];
-        }
-    };
-
-    const int MAX_ITERS = 12;
-    for (int it = 0; it < MAX_ITERS; ++it) {
-        bool changed = false;
-
-        // Optimize columns given rows
-        update_col_hash_in_R1();
-        int r1cnt = 0; for (int i = 0; i < N; ++i) r1cnt += R[i];
-        int r0cnt = N - r1cnt;
-
-        for (int j = 0; j < M; ++j) {
-            // If we set C[j]=1, whole column predicted '#': matches = # in column = col_hash_cnt[j]
-            int matches_if_C1 = col_hash_cnt[j];
-
-            // If C[j]=0, prediction equals R[i] per row.
-            // Matches from column j:
-            // = (# rows with R=1 and S='#') + (# rows with R=0 and S='.')
-            // = col_hash_in_R1[j] + (r0cnt - (# rows with R=0 and S='#'))
-            // (# rows with R=0 and S='#') = col_hash_cnt[j] - col_hash_in_R1[j]
-            // => matches_if_C0 = r0cnt - col_hash_cnt[j] + 2 * col_hash_in_R1[j]
-            int matches_if_C0 = r0cnt - col_hash_cnt[j] + (col_hash_in_R1[j] << 1);
-
-            bool choose1 = (matches_if_C1 > matches_if_C0) ||
-                           (bias_hash_on_tie && matches_if_C1 == matches_if_C0);
-            unsigned char newC = choose1 ? 1 : 0;
-            if (newC != C[j]) { C[j] = newC; changed = true; }
-        }
-
-        // Optimize rows given columns
-        update_row_hash_in_C1();
-        int c1cnt = 0; for (int j = 0; j < M; ++j) c1cnt += C[j];
-        int c0cnt = M - c1cnt;
-
-        for (int i = 0; i < N; ++i) {
-            // If R[i]=1, whole row predicted '#': matches = row_hash_cnt[i]
-            int matches_if_R1 = row_hash_cnt[i];
-
-            // If R[i]=0, prediction equals C[j]
-            // Matches on row i:
-            // = (# cols with C=1 and S='#') + (# cols with C=0 and S='.')
-            // Let a = row_hash_in_C1[i] = '# in row i at C=1'
-            // Then (# of '#' at C=0) = row_hash_cnt[i] - a
-            // matches_if_R0 = a + (c0cnt - (row_hash_cnt[i] - a)) = c0cnt - row_hash_cnt[i] + 2a
-            int a = row_hash_in_C1[i];
-            int matches_if_R0 = c0cnt - row_hash_cnt[i] + (a << 1);
-
-            bool choose1 = (matches_if_R1 > matches_if_R0) ||
-                           (bias_hash_on_tie && matches_if_R1 == matches_if_R0);
-            unsigned char newR = choose1 ? 1 : 0;
-            if (newR != R[i]) { R[i] = newR; changed = true; }
-        }
-
-        if (!changed) break;
+        lastPos[j] = lp; // -1 means no dots needed in this column
     }
 
-    // Count matches and build ops
-    long long matches = 0;
-    for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < M; ++j) {
-            char pred = (R[i] || C[j]) ? '#' : '.';
-            if (pred == S[i][j]) ++matches;
+    vector<vector<int>> buckets(order.size()); // columns to set '.' after a certain row index
+    for (int j = 0; j < M; ++j) if (lastPos[j] != -1) buckets[lastPos[j]].push_back(j);
+
+    // Emit commands
+    vector<Cmd> cmds;
+    cmds.reserve(order.size() + M);
+    for (int k = 0; k < (int)order.size(); ++k) {
+        int r = order[k];
+        // Only paint rows that actually need any '#'
+        if (F[r].find('#') != string::npos) cmds.push_back({"BARIS", r + 1, '#'});
+        if (!buckets[k].empty()) {
+            sort(buckets[k].begin(), buckets[k].end());
+            for (int j : buckets[k]) cmds.push_back({"KOLOM", j + 1, '.'});
         }
     }
-
-    vector<Operation> ops;
-    ops.reserve(N + M);
-    for (int i = 0; i < N; ++i) if (R[i]) ops.push_back({"BARIS", i+1, '#'});
-    for (int j = 0; j < M; ++j) if (C[j]) ops.push_back({"KOLOM", j+1, '#'});
-    return {matches, ops};
+    return cmds;
 }
-
-pair<long long, vector<Operation>> solve(int N, int M, const vector<string>& S, int /*strategy_type_unused*/) {
-    // Try a few small variants and pick the best:
-    // 1) bias to paint '#' on ties; start with empty R
-    // 2) bias to paint '#' on ties; start with rows seeded by majority
-    // 3) neutral tie (bias off);   start with empty R
-    // 4) neutral tie (bias off);   start with rows seeded by majority
-    pair<long long, vector<Operation>> best = { -1, {}};
-
-    auto try_update = [&](bool bias, bool seed_rows) {
-        auto cand = solve_only_hash_union(N, M, S, bias, seed_rows);
-        if (cand.first > best.first) best = cand;
-    };
-
-    try_update(true,  false);
-    try_update(true,  true);
-    try_update(false, false);
-    try_update(false, true);
-
-    return best;
-}
-// ----------------- END NEW SOLVER -----------------
 
 int main() {
-    // Define input and output directory paths
-    const string input_dir = "inputs/";
-    const string output_dir = "outputs/";
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
 
-    DIR *dir;
-    struct dirent *ent;
+    const string input_dir = "./inputs";
+    const string output_dir = "./outputs";
+    ensure_dir(output_dir);
 
-    // Open the directory and read file names
-    if ((dir = opendir(input_dir.c_str())) != NULL) {
-        // Iterate through all files and directories in the input directory.
-        while ((ent = readdir(dir)) != NULL) {
-            string filename = ent->d_name;
-
-            // Process only files with a ".in" extension
-            if (filename.length() > 3 && filename.substr(filename.length() - 3) == ".in") {
-                string input_filepath = input_dir + filename;
-                string output_filepath = output_dir + filename;
-                output_filepath.replace(output_filepath.length() - 3, 3, ".out");
-
-                cout << "Processing " << input_filepath << "..." << endl;
-
-                ifstream fin(input_filepath);
-                if (!fin.is_open()) {
-                    cerr << "Error: Could not open input file " << input_filepath << endl;
-                    continue;
+    // Collect inputs: input_<number>.in
+    vector<pair<int,string>> jobs;
+    regex pat(R"(mosaik_(\d+)\.in)");
+    if (DIR* d = opendir(input_dir.c_str())) {
+        if (d) {
+            dirent* ent;
+            while ((ent = readdir(d)) != nullptr) {
+                string name = ent->d_name;
+                smatch m;
+                if (regex_match(name, m, pat)) {
+                    int id = stoi(m[1].str());
+                    jobs.emplace_back(id, input_dir + "/" + name);
                 }
-
-                ofstream fout(output_filepath);
-                if (!fout.is_open()) {
-                    cerr << "Error: Could not open output file " << output_filepath << endl;
-                    fin.close();
-                    continue;
-                }
-
-                int N, M;
-                fin >> N >> M;
-                vector<string> S(N);
-                for (int i = 0; i < N; ++i) {
-                    fin >> S[i];
-                }
-
-                // Run both strategies and choose the best result
-                pair<long long, vector<Operation>> result1 = solve(N, M, S, 1);
-                pair<long long, vector<Operation>> result2 = solve(N, M, S, 2);
-
-                vector<Operation> final_ops;
-                if (result1.first >= result2.first) {
-                    final_ops = result1.second;
-                } else {
-                    final_ops = result2.second;
-                }
-
-                // Write the solution to the output file
-                fout << final_ops.size() << endl;
-                for (const auto& op : final_ops) {
-                    fout << op.type << " " << op.index << " " << op.color << endl;
-                }
-
-                fin.close();
-                fout.close();
-                cout << "Done." << endl;
             }
+            closedir(d);
         }
-        closedir(dir);
-    } else {
-        // Could not open the directory
-        cerr << "Error: Could not open directory " << input_dir << endl;
-        return 1;
     }
+    sort(jobs.begin(), jobs.end());
 
+    for (auto &job : jobs) {
+        int id; string inpath;
+        tie(id, inpath) = job;
+
+        vector<string> F;
+        if (!read_grid_from_file(inpath, F)) {
+            cerr << "Failed to read " << inpath << "\n";
+            continue;
+        }
+
+        auto cmds = solve_one_fast(F);
+
+        ostringstream oss;
+        oss << output_dir << "/mosaik_" << id << ".out";
+        string outpath = oss.str();
+
+        if (!write_commands_to_file(outpath, cmds)) {
+            cerr << "Failed to write " << outpath << "\n";
+        }
+    }
     return 0;
 }
