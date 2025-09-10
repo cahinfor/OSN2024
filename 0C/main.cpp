@@ -28,49 +28,84 @@ static bool read_grid_from_file(const string& path, vector<string>& F) {
 static bool write_commands_to_file(const string& path, const vector<Cmd>& cmds) {
     ofstream out(path.c_str());
     if (!out) return false;
-    out << (int)cmds.size() << "\n";
+    out << static_cast<int>(cmds.size()) << "\n";
     for (auto &c : cmds) out << c.type << ' ' << c.idx << ' ' << c.ch << "\n";
     return true;
 }
 
-// Fast solver using mask-group ordering (no dense DAG)
+/* ---------- Bit helpers for arbitrary M ---------- */
+
+static inline int num_chunks(int M) { return (M + 63) >> 6; }
+
+static inline bool get_bit(const vector<uint64_t>& v, int j) {
+    return (v[j >> 6] >> (j & 63)) & 1ULL;
+}
+
+static inline void set_bit(vector<uint64_t>& v, int j) {
+    v[j >> 6] |= (1ULL << (j & 63));
+}
+
+static inline void clear_bit(vector<uint64_t>& v, int j) {
+    v[j >> 6] &= ~(1ULL << (j & 63));
+}
+
+static inline bool contains_all(const vector<uint64_t>& a, const vector<uint64_t>& need) {
+    // Return true if (a & need) == need  <=>  (~a & need) == 0
+    for (size_t k = 0; k < need.size(); ++k) {
+        if ((~a[k]) & need[k]) return false;
+    }
+    return true;
+}
+
+/* Serialize chunk vector into a string key (fast hashing, equality) */
+static inline string chunks_key(const vector<uint64_t>& v) {
+    string s;
+    s.resize(v.size() * sizeof(uint64_t));
+    memcpy(&s[0], v.data(), v.size() * sizeof(uint64_t));
+    return s;
+}
+
+/* ---------- Fast solver with chunked masks (works for M up to millions) ---------- */
 static vector<Cmd> solve_one_fast(const vector<string>& F) {
     const int N = (int)F.size();
     const int M = N ? (int)F[0].size() : 0;
+    if (N == 0 || M == 0) return {};
 
-    // Build mask per row (bit = 1 means wants '.')
-    vector<uint32_t> rowMask(N, 0);
+    const int C = num_chunks(M);
+
+    // Build mask per row: bit=1 means the final needs '.' at that column
+    vector rowMask(N, vector<uint64_t>(C, 0));
     vector<int> rowsWithSharp; rowsWithSharp.reserve(N);
+
     for (int i = 0; i < N; ++i) {
-        uint32_t m = 0;
         bool anySharp = false;
         for (int j = 0; j < M; ++j) {
-            if (F[i][j] == '.') m |= (1u << j);
+            if (F[i][j] == '.') set_bit(rowMask[i], j);
             else anySharp = true;
         }
-        rowMask[i] = m;
         if (anySharp) rowsWithSharp.push_back(i);
     }
 
     if (rowsWithSharp.empty()) {
-        // All dots already; starting grid is dots, so nothing to do.
+        // All dots; starting grid is dots too, so no commands.
         return {};
     }
 
-    // Compress by mask
-    unordered_map<uint32_t, int> maskId;
-    maskId.reserve(rowsWithSharp.size()*2);
-    vector<uint32_t> masks; masks.reserve(rowsWithSharp.size());
+    // Compress by mask using serialized chunk key
+    unordered_map<string, int> maskId;
+    maskId.reserve(rowsWithSharp.size() * 2);
+
+    vector<vector<uint64_t>> masks; masks.reserve(rowsWithSharp.size());
     vector<int> cnt; cnt.reserve(rowsWithSharp.size());
     vector<vector<int>> rowsPerMask; rowsPerMask.reserve(rowsWithSharp.size());
 
     for (int r : rowsWithSharp) {
-        uint32_t m = rowMask[r];
-        auto it = maskId.find(m);
+        string key = chunks_key(rowMask[r]);
+        auto it = maskId.find(key);
         if (it == maskId.end()) {
             int id = (int)masks.size();
-            maskId[m] = id;
-            masks.push_back(m);
+            maskId.emplace(std::move(key), id);
+            masks.push_back(rowMask[r]);
             cnt.push_back(1);
             rowsPerMask.push_back(vector<int>{r});
         } else {
@@ -85,75 +120,61 @@ static vector<Cmd> solve_one_fast(const vector<string>& F) {
     // dotRemaining per column
     vector<long long> dotRemaining(M, 0);
     for (int id = 0; id < U; ++id) {
-        uint32_t m = masks[id];
-        for (int j = 0; j < M; ++j) if (m & (1u << j)) {
+        for (int j = 0; j < M; ++j) if (get_bit(masks[id], j)) {
             dotRemaining[j] += cnt[id];
         }
     }
 
-    // Build the processing order of rows (indices into original F)
+    // Order of rows to paint
     vector<int> order; order.reserve(rowsWithSharp.size());
 
-    // Fbits: columns that still have any dot remaining (1 = still need dots)
-    uint32_t Fbits = 0;
-    for (int j = 0; j < M; ++j) if (dotRemaining[j] > 0) Fbits |= (1u << j);
+    // Fbits: columns that still need any '.'
+    vector<uint64_t> Fbits(C, 0);
+    for (int j = 0; j < M; ++j) if (dotRemaining[j] > 0) set_bit(Fbits, j);
 
     vector<char> done(U, 0);
     bool progressed = true;
     while (progressed) {
         progressed = false;
-
-        // Scan all masks; pick any mask available: (m & Fbits) == Fbits
         for (int id = 0; id < U; ++id) if (!done[id] && cnt[id] > 0) {
-            uint32_t m = masks[id];
-            if ( (m & Fbits) == Fbits ) {
-                // Emit all rows of this mask (any order is fine)
+            if (contains_all(masks[id], Fbits)) {
+                // Emit all rows with this mask
                 for (int r : rowsPerMask[id]) order.push_back(r);
 
-                // Update counts
+                // Update counts and Fbits
                 int take = cnt[id];
                 cnt[id] = 0;
                 done[id] = 1;
-                for (int j = 0; j < M; ++j) if (m & (1u << j)) {
+
+                for (int j = 0; j < M; ++j) if (get_bit(masks[id], j)) {
                     dotRemaining[j] -= take;
-                    if (dotRemaining[j] == 0) {
-                        Fbits &= ~(1u << j); // this column no longer forces dot
-                    }
+                    if (dotRemaining[j] == 0) clear_bit(Fbits, j);
                 }
                 progressed = true;
-                // Keep scanning; Fbits may have shrunk, unlocking more masks.
             }
         }
     }
-
-    // Safety: if some masks remained (shouldn't happen for valid mosaics), append them anyway.
+    // Safety (shouldn't be needed if guaranteed solvable)
     for (int id = 0; id < U; ++id) if (cnt[id] > 0) {
         for (int r : rowsPerMask[id]) order.push_back(r);
         cnt[id] = 0;
     }
 
-    // Build placement of KOLOM after last row needing '.' in that column
+    // Place KOLOM after the last row that needs '.' in that column
     vector<int> lastPos(M, -1);
-    vector<int> pos(N, -1);
-    for (int i = 0; i < (int)order.size(); ++i) pos[order[i]] = i;
-    for (int j = 0; j < M; ++j) {
-        int lp = -1;
-        for (int idx = 0; idx < (int)order.size(); ++idx) {
-            int r = order[idx];
-            if (F[r][j] == '.') lp = idx;
-        }
-        lastPos[j] = lp; // -1 means no dots needed in this column
+    for (int idx = 0; idx < (int)order.size(); ++idx) {
+        int r = order[idx];
+        for (int j = 0; j < M; ++j) if (F[r][j] == '.') lastPos[j] = idx;
     }
 
-    vector<vector<int>> buckets(order.size()); // columns to set '.' after a certain row index
+    vector<vector<int>> buckets(order.size()); // columns to set '.' after row index
     for (int j = 0; j < M; ++j) if (lastPos[j] != -1) buckets[lastPos[j]].push_back(j);
 
-    // Emit commands
+    // Emit commands: BARIS then KOLOM bucket
     vector<Cmd> cmds;
     cmds.reserve(order.size() + M);
     for (int k = 0; k < (int)order.size(); ++k) {
         int r = order[k];
-        // Only paint rows that actually need any '#'
         if (F[r].find('#') != string::npos) cmds.push_back({"BARIS", r + 1, '#'});
         if (!buckets[k].empty()) {
             sort(buckets[k].begin(), buckets[k].end());
@@ -171,22 +192,20 @@ int main() {
     const string output_dir = "./outputs";
     ensure_dir(output_dir);
 
-    // Collect inputs: input_<number>.in
+    // Collect inputs: mosaik_<number>.in
     vector<pair<int,string>> jobs;
     regex pat(R"(mosaik_(\d+)\.in)");
     if (DIR* d = opendir(input_dir.c_str())) {
-        if (d) {
-            dirent* ent;
-            while ((ent = readdir(d)) != nullptr) {
-                string name = ent->d_name;
-                smatch m;
-                if (regex_match(name, m, pat)) {
-                    int id = stoi(m[1].str());
-                    jobs.emplace_back(id, input_dir + "/" + name);
-                }
+        dirent* ent;
+        while ((ent = readdir(d)) != nullptr) {
+            string name = ent->d_name;
+            smatch m;
+            if (regex_match(name, m, pat)) {
+                int id = stoi(m[1].str());
+                jobs.emplace_back(id, input_dir + "/" + name);
             }
-            closedir(d);
         }
+        closedir(d);
     }
     sort(jobs.begin(), jobs.end());
 
