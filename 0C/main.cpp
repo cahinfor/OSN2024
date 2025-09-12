@@ -37,117 +37,62 @@ static vector<Cmd> solve(const vector<string>& Grid) {
     const int N = static_cast<int>(Grid.size());
     const int M = N ? static_cast<int>(Grid[0].size()) : 0;
 
-    // Collect rows that have at least one '#'
-    vector<int> rowsWithSharp;
-    rowsWithSharp.reserve(N);
+    vector<int> rowWhiteCount, colWhiteCount;
     for (int i = 0; i < N; ++i) {
-        if (Grid[i].find('#') != string::npos) {
-            rowsWithSharp.push_back(i);
-        }
-    }
-    if (rowsWithSharp.empty()) {
-        return {};
-    }
-
-    // Group rows with identical strings
-    unordered_map<string,int> maskId;
-    maskId.reserve(rowsWithSharp.size() * 2);
-
-    vector<string> masks;
-    vector<int> counter;
-    vector<vector<int>> rowsPerMask;
-
-    for (int row : rowsWithSharp) {
-        const string& key = Grid[row];
-        auto it = maskId.find(key);
-        if (it == maskId.end()) {
-            int id = masks.size();
-            maskId[key] = id;
-            masks.push_back(key);
-            counter.push_back(1);
-            rowsPerMask.push_back(vector<int>{row});
-        } else {
-            int id = it->second;
-            counter[id]++;
-            rowsPerMask[id].push_back(row);
-        }
-    }
-
-    int U = masks.size();
-
-    // Count how many rows need '.' in each column
-    vector<long long> dotRemaining(M, 0);
-    for (int id = 0; id < U; ++id) {
+        int whiteCell = 0;
         for (int j = 0; j < M; ++j)
-            if (masks[id][j] == '.') {
-                dotRemaining[j] += counter[id];
-            }
+            if (Grid[i][j] == '.') ++whiteCell;
+        rowWhiteCount.push_back(whiteCell);
     }
+    vector<int> row_idx(N);
+    iota(row_idx.begin(), row_idx.end(), 0);
+    ranges::sort(row_idx, [&](int a, int b){
+        if (rowWhiteCount[a] != rowWhiteCount[b]) return rowWhiteCount[a] > rowWhiteCount[b]; // DESC
+        return a < b; // tie-break by smaller index
+    });
 
-    // Fbits as string: mark columns that still need any '.'
-    string Fbits(M, '0');
-    for (int j = 0; j < M; ++j)
-        if (dotRemaining[j] > 0) Fbits[j] = '1';
-
-    vector<char> done(U, 0);
-    bool progressed = true;
-    vector<int> order; order.reserve(rowsWithSharp.size());
-
-    while (progressed) {
-        progressed = false;
-        for (int id = 0; id < U; ++id) if (!done[id] && counter[id] > 0) {
-            // check if this mask has '.' in all columns where Fbits[j]=='1'
-            bool ok = true;
-            for (int j = 0; j < M; ++j) {
-                if (Fbits[j] == '1' && masks[id][j] != '.') {
-                    ok = false; break;
-                }
-            }
-            if (ok) {
-                // emit all rows with this mask
-                for (int r : rowsPerMask[id]) order.push_back(r);
-
-                int take = counter[id];
-                counter[id] = 0;
-                done[id] = 1;
-
-                // update dotRemaining and Fbits
-                for (int j = 0; j < M; ++j) if (masks[id][j] == '.') {
-                    dotRemaining[j] -= take;
-                    if (dotRemaining[j] == 0) Fbits[j] = '0';
-                }
-                progressed = true;
-            }
-        }
+    for (int i = 0; i < M; ++i) {
+        int whiteCell = 0;
+        for (int j = 0; j < N; ++j)
+            if (Grid[j][i] == '.') ++whiteCell;
+        colWhiteCount.push_back(whiteCell);
     }
+    vector<int> col_idx(M);
+    iota(col_idx.begin(), col_idx.end(), 0);
+    ranges::sort(col_idx, [&](int a, int b){
+        if (colWhiteCount[a] != colWhiteCount[b]) return colWhiteCount[a] < colWhiteCount[b]; // ASC
+        return a < b; // tie-break by smaller index
+    });
 
-    // Safety
-    for (int id = 0; id < U; ++id) if (counter[id] > 0) {
-        for (int r : rowsPerMask[id]) order.push_back(r);
-        counter[id] = 0;
-    }
-
-    // Decide where to put KOLOM
-    vector<int> lastPos(M, -1);
-    for (int idx = 0; idx < (int)order.size(); ++idx) {
-        int r = order[idx];
-        for (int j = 0; j < M; ++j)
-            if (Grid[r][j] == '.') lastPos[j] = idx;
-    }
-
-    vector<vector<int>> buckets(order.size());
-    for (int j = 0; j < M; ++j)
-        if (lastPos[j] != -1) buckets[lastPos[j]].push_back(j);
-
-    // Emit commands
     vector<Cmd> cmds;
-    cmds.reserve(order.size() + M);
-    for (int k = 0; k < (int)order.size(); ++k) {
-        int r = order[k];
-        cmds.push_back({"BARIS", r + 1, '#'}); // row had at least one '#'
-        if (!buckets[k].empty()) {
-            ranges::sort(buckets[k]);
-            for (int j : buckets[k]) cmds.push_back({"KOLOM", j + 1, '.'});
+    int i = 0;
+    int j = 0;
+    while (i < rowWhiteCount.size() || j < colWhiteCount.size()) {
+        if (i < N) {
+            int currentRowCount = rowWhiteCount[row_idx[i]];
+            int k = i;
+            while (k < N && rowWhiteCount[row_idx[k]] == currentRowCount) ++k;
+
+            // rows [i, k) all have the same highest remaining count
+            for (int t = i; t < k; ++t) {
+                int rowIndex = row_idx[t] + 1; // 1-based
+                cmds.push_back({"BARIS", rowIndex, '#'});
+            }
+            i = k; // advance to next "tier"
+        }
+
+        if (j < M) {
+            while (colWhiteCount[col_idx[j]] == 0) ++j; // skip if the col has no '.'
+            int currentColCount = colWhiteCount[col_idx[j]];
+            int k = j;
+            while (k < M && colWhiteCount[col_idx[k]] == currentColCount) ++k;
+
+            // cols [j, k) all have the same lowest remaining count
+            for (int t = j; t < k; ++t) {
+                int colIndex = col_idx[t] + 1; // 1-based
+                cmds.push_back({"KOLOM", colIndex, '.'});
+            }
+            j = k; // advance to next "tier"
         }
     }
 
